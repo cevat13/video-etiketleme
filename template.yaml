@@ -1,0 +1,143 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless Video Labeling - S3 + Lambda + Rekognition + DynamoDB
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures:
+      - x86_64
+    Timeout: 900
+    MemorySize: 256
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+        DYNAMODB_TABLE: !Ref VideoLabelsTable
+
+Resources:
+
+  VideoUploadBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'video-labeling-${AWS::AccountId}-${AWS::Region}'
+
+  VideoLabelsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'VideoLabels-${AWS::StackName}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: video_key
+          AttributeType: S
+        - AttributeName: analyzed_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: video_key
+          KeyType: HASH
+        - AttributeName: analyzed_at
+          KeyType: RANGE
+
+  VideoLabelingLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/VideoLabelingFn-${AWS::StackName}'
+      RetentionInDays: 30
+
+  VideoLabelingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'VideoLabelingRole-${AWS::StackName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RekognitionVideoPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rekognition:StartLabelDetection
+                  - rekognition:GetLabelDetection
+                Resource: '*'
+        - PolicyName: S3VideoReadPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:HeadObject
+                Resource: !Sub 'arn:aws:s3:::video-labeling-${AWS::AccountId}-${AWS::Region}/*'
+        - PolicyName: DynamoDBWritePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt VideoLabelsTable.Arn
+
+  VideoLabelingFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: VideoLabelingLogGroup
+    Properties:
+      FunctionName: !Sub 'VideoLabelingFn-${AWS::StackName}'
+      CodeUri: src/
+      Handler: handler.lambda_handler
+      Role: !GetAtt VideoLabelingRole.Arn
+      Description: Analyzes uploaded MP4 videos using AWS Rekognition
+      Events:
+        VideoUploadTrigger:
+          Type: S3
+          Properties:
+            Bucket: !Ref VideoUploadBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .mp4
+
+Outputs:
+  VideoUploadBucketName:
+    Description: S3 bucket for video uploads
+    Value: !Ref VideoUploadBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-BucketName'
+
+  VideoLabelsTableName:
+    Description: DynamoDB table name
+    Value: !Ref VideoLabelsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-TableName'
+
+  VideoLabelingFunctionName:
+    Description: Lambda function name
+    Value: !Ref VideoLabelingFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-FunctionName'
+
+  VideoLabelingFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt VideoLabelingFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-FunctionArn'
+
+  VideoLabelingRoleArn:
+    Description: Lambda IAM Role ARN
+    Value: !GetAtt VideoLabelingRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-RoleArn'
+
+  CloudWatchLogGroup:
+    Description: CloudWatch Log Group name
+    Value: !Ref VideoLabelingLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-LogGroup'
